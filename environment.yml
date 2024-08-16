@@ -1,4 +1,4 @@
-name: tf_gpu
+name: sunbear
 channels:
   - anaconda
   - conda-forge
