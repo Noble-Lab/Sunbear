@@ -717,21 +717,21 @@ class AEtimeRNA:
         n_iter_step2: document the niter for scRNA autoencoder, once it reaches nepoch_klstart_x, KL will start to warm up
 
         """
+        val_reconstr_x_loss_list = [];
+        val_kl_x_loss_list = [];
+        val_discriminator_x_loss_list = [];
+        reconstr_x_loss_list = [];
+        kl_x_loss_list = [];
+        discriminator_x_loss_list = [];
+        iter_list = []
+        loss_val_check_list = []
         saver = tf.train.Saver()
         if os.path.exists(output_model+'/mymodel.meta'):
             tf.reset_default_graph()
             saver = tf.train.import_meta_graph(output_model+'/mymodel.meta')
             saver.restore(self.sess, tf.train.latest_checkpoint(output_model+'/'))
         else:
-            val_reconstr_x_loss_list = [];
-            val_kl_x_loss_list = [];
-            val_discriminator_x_loss_list = [];
-            reconstr_x_loss_list = [];
-            kl_x_loss_list = [];
-            discriminator_x_loss_list = [];
             last_improvement=0
-            iter_list = []
-            loss_val_check_list = []
             patience=20
 
             sub_index = random.sample(range(data_x.shape[0]), data_x_val.shape[0])
@@ -872,7 +872,7 @@ class AEtimeRNA:
                     saver.restore(self.sess, tf.train.latest_checkpoint(output_model+'/'))
                     break
 
-            return iter_list, reconstr_x_loss_list, kl_x_loss_list, discriminator_x_loss_list, val_reconstr_x_loss_list, val_kl_x_loss_list, val_discriminator_x_loss_list
+        return iter_list, reconstr_x_loss_list, kl_x_loss_list, discriminator_x_loss_list, val_reconstr_x_loss_list, val_kl_x_loss_list, val_discriminator_x_loss_list
 
     def predict_embedding(self, data_x, batch_x):
         """
@@ -979,17 +979,10 @@ def process_adata(rna_h5ad, atac_h5ad, domain, batch, condition, d_time, time_ma
 
     if domain=='multi':
         atac_data = ad.read_h5ad(atac_h5ad)
-        rna_data_tmp = rna_data[random.sample(range(rna_data.shape[0]), 10000),:]
-        rna_data_tmp.write(filename='/net/noble/vol2/user/ranz0/2021_ranz0_sc-time/Sunbear/data/example_multi_rna.h5ad', compression=None, compression_opts=None, force_dense=None)
-        atac_data_tmp = atac_data[random.sample(range(atac_data.shape[0]), 10000),:]
-        atac_data_tmp.write(filename='data/example_multi_atac.h5ad', compression=None, compression_opts=None, force_dense=None)
         atac_data.obs['time'] = atac_data.obs['time'].astype(float)
         chr_list = {}
         for chri in atac_data.var.chr.unique():
             chr_list[chri] = [i for i, x in enumerate(atac_data.var['chr']) if x == chri];
-    else:
-        rna_data_tmp = rna_data[random.sample(range(rna_data.shape[0]), 10000),:]
-        rna_data_tmp.write(filename='data/example_single_rna.h5ad', compression=None, compression_opts=None, force_dense=None)
     if batch != '':
         rna_data.obs['batch'] = rna_data.obs[batch]
         if domain=='multi':

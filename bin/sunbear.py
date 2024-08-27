@@ -172,25 +172,20 @@ def train(cur_dir, rna_h5ad, atac_h5ad, sim_url, holdouttime, d_time, time_magni
                 fout.close()
             
                 ## plot loss per epoch curve
-                fig = plt.figure(figsize = (15,5))
+                fig = plt.figure(figsize = (10,5))
                 fig.subplots_adjust(hspace=.4, wspace=.4)
-                ax = fig.add_subplot(1,3,1)
+                ax = fig.add_subplot(1,2,1)
                 ax.plot(iter_list, reconstr_x_loss_list, color='blue', marker='.', markersize=0.5, alpha=1, label='train');
                 ax.plot(iter_list, val_reconstr_x_loss_list, color='orange', marker='.', markersize=0.5, alpha=1, label='val');
                 plt.legend(loc='upper right')
                 plt.title('reconstr loss')
 
-                ax = fig.add_subplot(1,3,2)
+                ax = fig.add_subplot(1,2,2)
                 ax.plot(iter_list, kl_x_loss_list, color='blue', marker='.', alpha=1, label='train');
                 ax.plot(iter_list, val_kl_x_loss_list, color='orange', marker='.', alpha=1, label='val');
                 plt.legend(loc='upper right')
                 plt.title('KL loss')
 
-                ax = fig.add_subplot(1,3,3)
-                ax.plot(iter_list, discriminator_x_loss_list, color='blue', marker='.', alpha=1, label='train');
-                ax.plot(iter_list, val_discriminator_x_loss_list, color='orange', marker='.', alpha=1, label='val');
-                plt.legend(loc='upper right')
-                plt.title('Discriminator loss')
                 fig.savefig(sim_url+ '_loss.png')
 
 
@@ -275,13 +270,13 @@ def pred(cur_dir, rna_h5ad, atac_h5ad, sim_url, holdouttime, d_time, time_magnit
                 ## generate swap_encoding
                 swap_encoding_target = rna_data_i.obsm['encoding'].to_numpy()
                 batch_encoding = pd.DataFrame(convert_batch_to_onehot(list(targetcondition), dataset_list=list(rna_data.obs['condition'].unique())).todense()) # TODO: replace only the condition encoding from the query
-                swap_encoding_target[:, d_time: (d_time + batch_encoding.shape[1])] = np.tile(batch_encoding.to_numpy(), (rna_data_i.shape[0],1))
+                swap_encoding_target[:, (-nlabel - batch_encoding.shape[1]): (-nlabel)] = np.tile(batch_encoding.to_numpy(), (rna_data_i.shape[0],1))
 
                 swap_encoding_source = rna_data_i.obsm['encoding'].to_numpy()
                 batch_encoding = pd.DataFrame(convert_batch_to_onehot(list(sourcecondition), dataset_list=list(rna_data.obs['condition'].unique())).todense()) # TODO: replace only the condition encoding from the query
                 swap_encoding_source[:, (-nlabel - batch_encoding.shape[1]): (-nlabel)] = np.tile(batch_encoding.to_numpy(), (rna_data_i.shape[0],1))
 
-                calc_condition_diffexp(sim_url + '_' + str(targettime) + sourcecondition+ targetcondition , autoencoder, rna_data_i, swap_encoding_source, swap_encoding_target, ct_query)
+                calc_condition_diffexp(sim_url + '_' + str(targettime) + sourcecondition+ targetcondition , autoencoder, rna_data_i, swap_encoding_source, swap_encoding_target)
 
         ## make predictions of dynamic peak accessibility and gene expression changes for scRNA-seq query
         if domain == 'multi':
