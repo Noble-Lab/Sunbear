@@ -1,13 +1,23 @@
 # Sunbear
 Single-cell multi-modal/multi-condition temporal inference model
 
+![sunbear_schema](https://github.com/user-attachments/assets/86b76cb1-f63a-4f44-809d-c64e993f0e70)
+
 ## Overview
 The Sunbear model performs temporal inference alongside cross-condition and cross-modality inference, which can be applied to:
 1. infer how a cellular profile changes along a continuous time frame
 2. compare condition-differences on time-series data with few matched conditions
 3. jointly infer temporal multimodal profile changes for each cell
 
+
 ## Installation
+Install via docker:
+```
+apptainer pull docker://bearfam/bears
+apptainer shell --nv bears_latest.sif
+```
+
+Install via conda:
 ```
 conda env create -f environment.yml
 conda activate sunbear
@@ -18,7 +28,7 @@ bash ./example.sh
 ```
 
 ## Input data:
-The code takes in h5ad format (ref https://anndata.readthedocs.io/en/latest/generated/anndata.AnnData.html).
+The code takes in [h5ad format](https://anndata.readthedocs.io/en/latest/generated/anndata.AnnData.html). Here are some [examples](https://noble.gs.washington.edu/~ranz0/Sunbear/data/).
 
 The h5ad object for scRNA-seq consists of:
 - gene expression count matrix (rna_adata.X)
