@@ -34,38 +34,59 @@ import math
 import statistics
 
 
-def train(cur_dir, rna_h5ad, atac_h5ad, sim_url, holdouttime, d_time, time_magnitude_float, embed_dim, nlayer, dropout_rate, learning_rate_x, learning_rate_y, discriminator_weight, batch_size, mse_weight, domain, batch, condition, randseed):
+def train(cur_dir, rna_h5ad, atac_h5ad, sim_url, holdouttime, d_time, time_magnitude_float, embed_dim, nlayer, dropout_rate, learning_rate_x, learning_rate_y, discriminator_weight, batch_size, mse_weight, domain, batch, condition, randseed, train_ver):
     """
     train/load the Sunbear model
     Parameters
     ----------
-    outdir: output directory
+    cur_dir: current directory
+    rna_h5ad: path to scRNA-seq h5ad file
+    atac_h5ad: path to scATAC-seq h5ad file
+    sim_url: path to the model
+    holdouttime: time point that was held out during training
+    d_time: number of time points
+    time_magnitude_float: time magnitude in radians
+    embed_dim: embedding dimension
+    nlayer: number of layers in the autoencoder
+    dropout_rate: dropout rate for hidden layers of autoencoders
+    learning_rate_x: learning rate for scRNA-seq
+    learning_rate_y: learning rate for scATAC-seq
+    discriminator_weight: weight for the discriminator loss
+    batch_size: batch size for training
+    mse_weight: weight for the MSE loss
+    domain: 'rna' (rna only) or 'multi' (for multimodal)
+    batch: batch column name in anndata
+    condition: condition column name in anndata
+    randseed: random seed for reproducibility
+    train_ver: whether train with real data or "simulation"
+    -----------
+    Returns
+    -------
+    None
     
     """
-    if os.path.isfile(sim_url+'/checkpoint') is False:
+    if os.path.isfile(sim_url+'/checkpoint') is False: # if the model does not exist, train it
         logging.info('Training model ' + sim_url)
-        ## ======================
+
         ## load and preprocess data to the required format
-        ## ======================
         logging.info('Loading data...')
-        rna_data, atac_data, nlabel = process_adata(rna_h5ad, atac_h5ad, domain, batch, condition, d_time, time_magnitude_float)
+        rna_data, atac_data, nlabel, ncondition = process_adata(rna_h5ad, atac_h5ad, domain, batch, condition, d_time, time_magnitude_float)
         nsubsample = 2000
-        ## =====================================
+
         ## split train, test, val
-        ## val and test would be random subset of cells in later time points that are shared between scATAC and scRNA
-        ## =====================================
-        ## hold out an entire scATAC timepoint as unseen
+        # hold out an entire timepoint as the test set, and use the rest of them as train/validation.
         rna_data_test = rna_data[rna_data.obs.time==holdouttime,]
         rna_data_train = rna_data[rna_data.obs.time!=holdouttime,]
+        # RNA
         if domain=='multi':
-            chr_list = {}
+            chr_list = {} # make a dictionary of each chromosome's corresponding peak index so that we can train the memory-intensive layers of ATAC-seq model per chromosome to save memory
             for chri in atac_data.var.chr.unique():
                 chr_list[chri] = [i for i, x in enumerate(atac_data.var['chr']) if x == chri];
             atac_data_test = atac_data[atac_data.obs.time==holdouttime,]
             atac_data_train = atac_data[atac_data.obs.time!=holdouttime,]
 
-        ## sample equal number of cells in each validation timepoint as validation set
-        ## only get val and from remaining scATAC time points
+        # sample equal number of cells in each timepoint as validation set
+        # RNA
         rna_data_val_index = []
         for time_i in rna_data.obs.time.unique():
             random.seed(randseed)
@@ -73,21 +94,22 @@ def train(cur_dir, rna_h5ad, atac_h5ad, sim_url, holdouttime, d_time, time_magni
             min(int(sum(rna_data_train.obs.time==time_i) * 0.2), nsubsample)))
         rna_data_val = rna_data_train[rna_data_val_index,:]
 
-        ## use all cells that are not assigned to validation set as training set
+        # assign all cells that are not within the test and validation set to the training set
         rna_data_train = rna_data_train[~rna_data_train.obs.index.isin(rna_data_val_index),:]
 
         if domain=='multi':
-            # use the same set of cells in scRNA validation set
+            # ATAC
+            # for cells with co-assays, use the same set of cells in the scRNA validation set as scATAC validation set
             atac_data_val_index = list(set(atac_data_train.obs.index) & set(rna_data_val_index))
             atac_data_val = atac_data_train[atac_data_val_index,:]
             atac_data_train = atac_data_train[~atac_data_train.obs.index.isin(atac_data_val_index),:]
 
-            ## since the test set can be large too, we subsample the test set
+            ## to save memory, we subsample the test set when it's too large
             if atac_data_test.shape[0] > 10000:
                 random.seed(randseed)
                 atac_data_test = atac_data_test[random.sample(list(atac_data_test.obs.index),10000),:]
 
-        ## input all data and shuffle indices of train and validation
+        # input all data and shuffle indices of train and validation
         # RNA
         data_x_train, batch_x_train = randomize_adata(rna_data_train, randseed)
         data_x_val, batch_x_val = randomize_adata(rna_data_val, randseed)
@@ -113,7 +135,7 @@ def train(cur_dir, rna_h5ad, atac_h5ad, sim_url, holdouttime, d_time, time_magni
             data_y_co = atac_data_train[atac_data_train_index,:].X.tocsr()
             batch_y_co = atac_data_train[atac_data_train_index,:].obsm['encoding'].to_numpy()
         
-        ## clear some variables to free up memory
+        ## delete some useless variables to free up memory
         del rna_data_train
         del rna_data
         if domain=='multi':
@@ -127,11 +149,11 @@ def train(cur_dir, rna_h5ad, atac_h5ad, sim_url, holdouttime, d_time, time_magni
         ## train the model
         ## ===================================
         logging.info('Training model...')
-    
+        
         ## train the model
         tf.reset_default_graph()
         if domain=='multi':
-            autoencoder = AEtimeMulti(input_dim_x=data_x_train.shape[1], batch_dim_x=batch_x_train.shape[1], d_time=d_time, embed_dim=embed_dim, nlayer=nlayer, dropout_rate=dropout_rate, learning_rate_x=learning_rate_x, learning_rate_y=learning_rate_y, input_dim_y=data_y_train.shape[1], batch_dim_y=batch_y_train.shape[1], chr_list=chr_list, nlabel=nlabel, discriminator_weight=discriminator_weight,  mse_weight=mse_weight);
+            autoencoder = AEtimeMulti(input_dim_x=data_x_train.shape[1], batch_dim_x=batch_x_train.shape[1], d_time=d_time, embed_dim=embed_dim, nlayer=nlayer, dropout_rate=dropout_rate, learning_rate_x=learning_rate_x, learning_rate_y=learning_rate_y, input_dim_y=data_y_train.shape[1], batch_dim_y=batch_y_train.shape[1], chr_list=chr_list, nlabel=nlabel, ncondition=ncondition, discriminator_weight=discriminator_weight,  mse_weight=mse_weight);
             
             iter_list, val_reconstr_x_loss_list, val_kl_x_loss_list, val_reconstr_y_loss_list, val_kl_y_loss_list, val_translator_xy_loss_list, val_translator_yx_loss_list = autoencoder.train(sim_url, data_x_train, batch_x_train, data_x_val, batch_x_val, data_y_train, batch_y_train, data_y_val, batch_y_val, data_x_co, data_y_co, batch_x_co, batch_y_co, data_x_val_co, data_y_val_co, batch_x_val_co, batch_y_val_co, batch_size, nlayer, d_time, dropout_rate)
             
@@ -143,7 +165,7 @@ def train(cur_dir, rna_h5ad, atac_h5ad, sim_url, holdouttime, d_time, time_magni
                     
                 fout.close()
 
-                ## plot loss curve
+                # plot loss curve
                 fig = plt.figure(figsize = (10,5))
                 fig.subplots_adjust(hspace=.4, wspace=.4)
                 ax = fig.add_subplot(1,2,1)
@@ -161,7 +183,7 @@ def train(cur_dir, rna_h5ad, atac_h5ad, sim_url, holdouttime, d_time, time_magni
                 fig.savefig(sim_url+ '_loss.png')
 
         if domain=='rna':
-            autoencoder = AEtimeRNA(input_dim_x=data_x_train.shape[1], batch_dim_x=batch_x_train.shape[1], embed_dim_x=embed_dim, nlayer=nlayer, dropout_rate=dropout_rate, output_model=sim_url, learning_rate_x=learning_rate_x, nlabel=nlabel, discriminator_weight=discriminator_weight);
+            autoencoder = AEtimeRNA(input_dim_x=data_x_train.shape[1], batch_dim_x=batch_x_train.shape[1], embed_dim_x=embed_dim, nlayer=nlayer, dropout_rate=dropout_rate, output_model=sim_url, learning_rate_x=learning_rate_x, nlabel=nlabel, discriminator_weight=discriminator_weight, train_ver=train_ver);
             iter_list, reconstr_x_loss_list, kl_x_loss_list, discriminator_x_loss_list, val_reconstr_x_loss_list, val_kl_x_loss_list, val_discriminator_x_loss_list = autoencoder.train(sim_url, data_x_train, batch_x_train, data_x_val, batch_x_val, batch_size=batch_size, nlayer=nlayer, dropout_rate=dropout_rate);
 
             ## write and plot loss per epoch
@@ -171,7 +193,7 @@ def train(cur_dir, rna_h5ad, atac_h5ad, sim_url, holdouttime, d_time, time_magni
                     fout.write(str(iter_list[i])+'\t'+str(reconstr_x_loss_list[i])+'\t'+str(kl_x_loss_list[i])+'\t'+str(discriminator_x_loss_list[i])+'\t'+str(val_reconstr_x_loss_list[i])+'\t'+str(val_kl_x_loss_list[i])+'\t'+str(val_discriminator_x_loss_list[i])+'\n')
                 fout.close()
             
-                ## plot loss per epoch curve
+                # plot loss per epoch curve
                 fig = plt.figure(figsize = (10,5))
                 fig.subplots_adjust(hspace=.4, wspace=.4)
                 ax = fig.add_subplot(1,2,1)
@@ -197,12 +219,10 @@ def train(cur_dir, rna_h5ad, atac_h5ad, sim_url, holdouttime, d_time, time_magni
             logging.info('Loading model with dropout_rate=0...')
             tf.reset_default_graph()
             if domain=='multi':
-                autoencoder = AEtimeMulti(input_dim_x=data_x_train.shape[1], batch_dim_x=batch_x_train.shape[1], d_time=d_time, embed_dim=embed_dim, nlayer=nlayer, dropout_rate=0, learning_rate_x=learning_rate_x, learning_rate_y=learning_rate_y, input_dim_y=data_y_train.shape[1], batch_dim_y=batch_y_train.shape[1], chr_list=chr_list, nlabel=nlabel, discriminator_weight=discriminator_weight, mse_weight=mse_weight);
+                autoencoder = AEtimeMulti(input_dim_x=data_x_train.shape[1], batch_dim_x=batch_x_train.shape[1], d_time=d_time, embed_dim=embed_dim, nlayer=nlayer, dropout_rate=0, learning_rate_x=learning_rate_x, learning_rate_y=learning_rate_y, input_dim_y=data_y_train.shape[1], batch_dim_y=batch_y_train.shape[1], chr_list=chr_list, nlabel=nlabel, ncondition=ncondition, discriminator_weight=discriminator_weight, mse_weight=mse_weight);
                 iter_list, val_reconstr_x_loss_list, val_kl_x_loss_list, val_reconstr_y_loss_list, val_kl_y_loss_list, val_translator_xy_loss_list, val_translator_yx_loss_list = autoencoder.train(sim_url,data_x_train, batch_x_train, data_x_val, batch_x_val, data_y_train, batch_y_train, data_y_val, batch_y_val, data_x_co, data_y_co, batch_x_co, batch_y_co, data_x_val_co, data_y_val_co, batch_x_val_co, batch_y_val_co,  batch_size, nlayer, d_time, dropout_rate)
 
-                ## =================
                 ## output evaluation metrics on validation set
-                ## =================
                 sim_metric_val = []
                 ## get translation loss between rna and atac in validation set
                 loss_mat = pd.read_csv(sim_url+'_loss_per_epoch.txt', delimiter='\t')
@@ -221,118 +241,155 @@ def train(cur_dir, rna_h5ad, atac_h5ad, sim_url, holdouttime, d_time, time_magni
                 np.savetxt(sim_url+'_validation.txt', sim_metric_val, delimiter='\n', fmt='%1.10f')
 
             if domain=='rna':
-                autoencoder = AEtimeRNA(input_dim_x=data_x_train.shape[1], batch_dim_x=batch_x_train.shape[1], embed_dim_x=embed_dim, nlayer=nlayer, dropout_rate=0, output_model=sim_url, learning_rate_x=learning_rate_x, nlabel=nlabel, discriminator_weight=discriminator_weight);
+                autoencoder = AEtimeRNA(input_dim_x=data_x_train.shape[1], batch_dim_x=batch_x_train.shape[1], embed_dim_x=embed_dim, nlayer=nlayer, dropout_rate=0, output_model=sim_url, learning_rate_x=learning_rate_x, nlabel=nlabel, discriminator_weight=discriminator_weight, train_ver=train_ver);
                 iter_list, reconstr_x_loss_list, kl_x_loss_list, discriminator_x_loss_list, val_reconstr_x_loss_list, val_kl_x_loss_list, val_discriminator_x_loss_list = autoencoder.train(sim_url, data_x_train, batch_x_train, data_x_val, batch_x_val, batch_size=batch_size, nlayer=nlayer, dropout_rate=0);
 
-                ## =================
                 ## output evaluation metrics on validation set
-                ## =================
-                eval_model_rna(sim_url, rna_data_val, holdouttime)
+                eval_model_rna(sim_url, autoencoder, rna_data_val, holdouttime)
 
 
 
-def pred(cur_dir, rna_h5ad, atac_h5ad, sim_url, holdouttime, d_time, time_magnitude_float, embed_dim, nlayer, dropout_rate, learning_rate_x, learning_rate_y, discriminator_weight, batch_size, mse_weight, domain, batch, condition, randseed, targettime, sourcecondition, targetcondition, ct_query, predict, time_step, time_range):
+def pred(cur_dir, rna_h5ad, atac_h5ad, sim_url, holdouttime, d_time, time_magnitude_float, embed_dim, nlayer, dropout_rate, learning_rate_x, learning_rate_y, discriminator_weight, batch_size, mse_weight, domain, batch, condition, randseed, targettime, sourcecondition, targetcondition, ct_query, predict, time_step, time_range, train_ver, celltype):
     """
-    downstream applications
+    load data and model, make predictions
     Parameters
     ----------
-    outdir: output directory
+    cur_dir: current directory
+    rna_h5ad: path to scRNA-seq h5ad file
+    atac_h5ad: path to scATAC-seq h5ad file
+    sim_url: path to the model
+    holdouttime: time point that was held out during training
+    d_time: number of time points
+    time_magnitude_float: time magnitude in radians
+    embed_dim: embedding dimension
+    nlayer: number of layers in the autoencoder
+    dropout_rate: dropout rate for hidden layers of autoencoders
+    learning_rate_x: learning rate for scRNA-seq
+    learning_rate_y: learning rate for scATAC-seq
+    discriminator_weight: weight for the discriminator loss
+    batch_size: batch size for training
+    mse_weight: weight for the MSE loss
+    domain: 'rna' or 'multi' (for multimodal)
+    batch: batch column name in anndata
+    condition: condition column name in anndata
+    randseed: random seed for reproducibility
+    targettime: target time point for prediction
+    sourcecondition: query/source condition for differential expression prediction
+    targetcondition: target condition for differential expression prediction
+    ct_query: cell type query for temporal prediction
+    predict: 'temporal' for temporal prediction, 'diffexp_condition' for differential expression prediction
+    time_step: time step for temporal prediction
+    time_range: time range for temporal prediction
+    train_ver: whether train with real data or "simulation"
+    -----------
+    Returns
+    -------
+    None
     
     """
-    rna_data, atac_data, nlabel = process_adata(rna_h5ad, atac_h5ad, domain, batch, condition, d_time, time_magnitude_float)
+    ## load the data and model
+    rna_data, atac_data, nlabel, ncondition = process_adata(rna_h5ad, atac_h5ad, domain, batch, condition, d_time, time_magnitude_float)
     if os.path.isfile(sim_url+'/checkpoint') is True:
         ## load the model
         logging.info('Loading model '+ sim_url)
         tf.reset_default_graph()
-        if domain=='multi':
-            chr_list = {}
-            for chri in atac_data.var.chr.unique():
-                chr_list[chri] = [i for i, x in enumerate(atac_data.var['chr']) if x == chri];
-            autoencoder = AEtimeMulti(input_dim_x=rna_data.X.shape[1], batch_dim_x=rna_data.obsm['encoding'].shape[1], d_time=d_time, embed_dim=embed_dim, nlayer=nlayer, dropout_rate=0, learning_rate_x=learning_rate_x, learning_rate_y=learning_rate_y, input_dim_y=atac_data.X.shape[1], batch_dim_y=atac_data.obsm['encoding'].shape[1], chr_list=chr_list, nlabel=nlabel, discriminator_weight=discriminator_weight, mse_weight=mse_weight);
-            autoencoder.train(sim_url)
-
+        
         if domain=='rna':
-            rna_data.obs['celltype'] = rna_data.obs.major_trajectory
-            autoencoder = AEtimeRNA(input_dim_x=rna_data.X.shape[1], batch_dim_x=rna_data.obsm['encoding'].shape[1], embed_dim_x=embed_dim, nlayer=nlayer, dropout_rate=0, output_model=sim_url, learning_rate_x=learning_rate_x, nlabel=nlabel, discriminator_weight=discriminator_weight);
+            # put cell type/trajectory information to celltype column. This information is not used for training but can be used for evaluation and prediction.
+            if celltype != '': #specify cell type column
+                rna_data.obs['celltype'] = rna_data.obs[celltype]
+            autoencoder = AEtimeRNA(input_dim_x=rna_data.X.shape[1], batch_dim_x=rna_data.obsm['encoding'].shape[1], embed_dim_x=embed_dim, nlayer=nlayer, dropout_rate=0, output_model=sim_url, learning_rate_x=learning_rate_x, nlabel=nlabel, discriminator_weight=discriminator_weight, train_ver=train_ver);
             autoencoder.train(sim_url)
 
-        if domain == 'rna':
+            ## predict single cell profiles across time
             if predict=='temporal':
-                ## ===================================
-                ## predict single cell profiles across time
-                ## ===================================
                 calc_temporal_exp(sim_url, autoencoder, domain, rna_data, atac_data, ct_query, targettime, time_step, time_range, d_time, time_magnitude_float)
 
+            ## predict differential expression between conditions
             if predict=='diffexp_condition':
-                ## query cell
+                # define a set of cells as queries (example: use all cells from the targettime)
                 rna_data_i = rna_data[rna_data.obs.time==targettime, :]
                             
-                ## generate swap_encoding
+                # generate encodings for source and target condition, and replace the condition encoding with corresponding target and source conditions encoding
+                # target encoding
                 swap_encoding_target = rna_data_i.obsm['encoding'].to_numpy()
-                batch_encoding = pd.DataFrame(convert_batch_to_onehot(list(targetcondition), dataset_list=list(rna_data.obs['condition'].unique())).todense()) # TODO: replace only the condition encoding from the query
-                swap_encoding_target[:, (-nlabel - batch_encoding.shape[1]): (-nlabel)] = np.tile(batch_encoding.to_numpy(), (rna_data_i.shape[0],1))
-
+                condition_encoding = pd.DataFrame(convert_batch_to_onehot(list(targetcondition), dataset_list=list(rna_data.obs['condition'].unique())).todense())
+                swap_encoding_target[:, (-nlabel - ncondition): (-nlabel)] = np.tile(condition_encoding.to_numpy(), (rna_data_i.shape[0],1))
+                # source encoding
                 swap_encoding_source = rna_data_i.obsm['encoding'].to_numpy()
-                batch_encoding = pd.DataFrame(convert_batch_to_onehot(list(sourcecondition), dataset_list=list(rna_data.obs['condition'].unique())).todense()) # TODO: replace only the condition encoding from the query
-                swap_encoding_source[:, (-nlabel - batch_encoding.shape[1]): (-nlabel)] = np.tile(batch_encoding.to_numpy(), (rna_data_i.shape[0],1))
+                condition_encoding = pd.DataFrame(convert_batch_to_onehot(list(sourcecondition), dataset_list=list(rna_data.obs['condition'].unique())).todense())
+                swap_encoding_source[:, (-nlabel - ncondition): (-nlabel)] = np.tile(condition_encoding.to_numpy(), (rna_data_i.shape[0],1))
 
+                # calculate differential expression
                 calc_condition_diffexp(sim_url + '_' + str(targettime) + sourcecondition+ targetcondition , autoencoder, rna_data_i, swap_encoding_source, swap_encoding_target)
 
         ## make predictions of dynamic peak accessibility and gene expression changes for scRNA-seq query
-        if domain == 'multi':
+        if domain=='multi':
+            if celltype != '': #specify cell type column
+                atac_data.obs['celltype'] = atac_data.obs[celltype]
+            chr_list = {}
+            for chri in atac_data.var.chr.unique():
+                chr_list[chri] = [i for i, x in enumerate(atac_data.var['chr']) if x == chri];
+            autoencoder = AEtimeMulti(input_dim_x=rna_data.X.shape[1], batch_dim_x=rna_data.obsm['encoding'].shape[1], d_time=d_time, embed_dim=embed_dim, nlayer=nlayer, dropout_rate=0, learning_rate_x=learning_rate_x, learning_rate_y=learning_rate_y, input_dim_y=atac_data.X.shape[1], batch_dim_y=atac_data.obsm['encoding'].shape[1], chr_list=chr_list, nlabel=nlabel, ncondition=ncondition, discriminator_weight=discriminator_weight, mse_weight=mse_weight);
+            autoencoder.train(sim_url)
+
+            ## calculate multimodal temporal patterns
             if predict=='temporal':
-                ## ===================================
-                ## calculate multimodal temporal patterns
-                ## ===================================
                 calc_temporal_exp(sim_url, autoencoder, domain, rna_data, atac_data, ct_query, targettime, time_step, time_range, d_time, time_magnitude_float)
         
 
         
 def main(args):
-    cur_dir = args.cur_dir
-    rna_h5ad = args.rna_h5ad
-    atac_h5ad = args.atac_h5ad
-    learning_rate_x = args.learning_rate_x;
-    learning_rate_y = args.learning_rate_y;
-    embed_dim = args.embed_dim;
-    dropout_rate = args.dropout_rate;
-    nlayer = args.nlayer;
-    batch_size = args.batch_size
-    holdouttime = args.holdouttime
-    targettime = args.targettime
-    d_time = args.d_time
-    discriminator_weight = args.discriminator_weight
-    mse_weight = args.mse_weight
-    time_magnitude = args.time_magnitude
-    sourcecondition = args.sourcecondition
-    targetcondition = args.targetcondition
-    predict = args.predict
-    domain = args.domain
-    batch = args.batch
-    condition = args.condition
-    randseed = args.randseed
-    ct_query = args.ct_query
-    time_step = args.time_step
-    time_range = args.time_range
-    if time_magnitude.endswith('d'): ## if time is specified to vary according to unit of days
+    cur_dir = args.cur_dir # current directory
+    rna_h5ad = args.rna_h5ad # path to scRNA-seq h5ad file
+    atac_h5ad = args.atac_h5ad # path to scATAC-seq h5ad file
+    learning_rate_x = args.learning_rate_x; # learning rate for scRNA-seq
+    learning_rate_y = args.learning_rate_y; # learning rate for scATAC-seq
+    embed_dim = args.embed_dim; # embedding dimension
+    dropout_rate = args.dropout_rate; # dropout rate for hidden layers of autoencoders
+    nlayer = args.nlayer; # number of layers in the autoencoder
+    batch_size = args.batch_size # batch size for training
+    holdouttime = args.holdouttime # time point that was held out during training
+    targettime = args.targettime # target time point for prediction
+    d_time = args.d_time # number of time points
+    discriminator_weight = args.discriminator_weight # weight for the discriminator loss
+    mse_weight = args.mse_weight # weight for the MSE loss
+    time_magnitude = args.time_magnitude # time magnitude in radians
+    sourcecondition = args.sourcecondition # source condition for differential expression prediction
+    targetcondition = args.targetcondition # target condition for differential expression prediction
+    predict = args.predict # 'temporal' for temporal prediction, 'diffexp_condition' for differential expression prediction
+    domain = args.domain # 'rna' or 'multi' (for multimodal)
+    batch = args.batch # batch column name in anndata
+    condition = args.condition # condition column name in anndata
+    randseed = args.randseed # random seed for reproducibility
+    ct_query = args.ct_query # cell type query for temporal prediction
+    time_step = args.time_step # time step for temporal prediction
+    time_range = args.time_range # time range for temporal prediction
+    train_ver = args.train_ver # "" or simulation
+    celltype = args.celltype # column name indicating cell type, used for prediction
+    if time_magnitude.endswith('d'):
+        # when time is specified to vary according to a unit of days, we sync the most frequent wave in sinusoidal encoding with the circadian rhythm.
         time_magnitude_float = 2*np.pi/float(time_magnitude[:-1])
     else:
         time_magnitude_float = float(time_magnitude)
 
-    out_dir = cur_dir + '/output/'+ domain+'/'
+    ## make output directory and specify model prefix
+    out_dir = cur_dir + '/output/'+ domain+ train_ver+ '_ndim'+ str(embed_dim) + '/'
     os.system('mkdir -p '+ out_dir)
     sim_url = out_dir+ 'model_time'+ str(holdouttime).rstrip('0').rstrip('.')+ '_'+ str(time_magnitude)+ '_'+ str(d_time)+ '_ndim'+str(embed_dim)+ '_mse'+ str(mse_weight)+ '_rand'+ str(randseed)
 
     ## train the model if it doesn't exist:
-    train(cur_dir, rna_h5ad, atac_h5ad, sim_url, holdouttime, d_time, time_magnitude_float, embed_dim, nlayer, dropout_rate, learning_rate_x, learning_rate_y, discriminator_weight, batch_size, mse_weight, domain, batch, condition, randseed)
+    train(cur_dir, rna_h5ad, atac_h5ad, sim_url, holdouttime, d_time, time_magnitude_float, embed_dim, nlayer, dropout_rate, learning_rate_x, learning_rate_y, discriminator_weight, batch_size, mse_weight, domain, batch, condition, randseed, train_ver)
     
     ## make predictions
-    pred(cur_dir, rna_h5ad, atac_h5ad, sim_url, holdouttime, d_time, time_magnitude_float, embed_dim, nlayer, dropout_rate, learning_rate_x, learning_rate_y, discriminator_weight, batch_size, mse_weight, domain, batch, condition, randseed, targettime, sourcecondition, targetcondition, ct_query, predict, time_step, time_range)
+    pred(cur_dir, rna_h5ad, atac_h5ad, sim_url, holdouttime, d_time, time_magnitude_float, embed_dim, nlayer, dropout_rate, learning_rate_x, learning_rate_y, discriminator_weight, batch_size, mse_weight, domain, batch, condition, randseed, targettime, sourcecondition, targetcondition, ct_query, predict, time_step, time_range, train_ver, celltype)
 
 
 if __name__ == "__main__":
+    ## parse arguments
     parser = argparse.ArgumentParser(description='Optional app description');
     parser.add_argument('--domain', type=str, help='rna or multi', default='multi');
+    parser.add_argument('--train_ver', type=str, help='"" or simulation', default='');
     parser.add_argument('--cur_dir', type=str, help='cur_dir', default='.');
     parser.add_argument('--ct_query', type=str, help='ct_query', default='');
     parser.add_argument('--rna_h5ad', type=str, help='rna_h5ad', default='');
@@ -358,6 +415,7 @@ if __name__ == "__main__":
     parser.add_argument('--time_step', type=float, help='time_step', default=0.02);
     parser.add_argument('--time_range', type=float, help='time_range', default=1);
     parser.add_argument('--predict', type=str, help='make prediction on dynamic correlation ("predict" if yes, "" if no)', default='');
+    parser.add_argument('--celltype', type=str, help='"" or cell type column name', default='');
 
     args = parser.parse_args();
     main(args);

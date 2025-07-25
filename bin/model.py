@@ -30,7 +30,7 @@ import matplotlib.pyplot as plt
 ## ============================================================
 
 class AEtimeMulti:
-    def __init__(self, input_dim_x, batch_dim_x, d_time, embed_dim, nlayer, dropout_rate, learning_rate_x, learning_rate_y, input_dim_y, batch_dim_y, chr_list, nlabel=2, discriminator_weight=1, mse_weight=1):
+    def __init__(self, input_dim_x, batch_dim_x, d_time, embed_dim, nlayer, dropout_rate, learning_rate_x, learning_rate_y, input_dim_y, batch_dim_y, chr_list, nlabel=2, ncondition=0, discriminator_weight=1, mse_weight=1):
         """
         Network architecture and optimization
 
@@ -49,19 +49,26 @@ class AEtimeMulti:
         kl_weight_x: kl weight of the scRNA VAE that is increasing with epoch
         kl_weight_y: kl weight of the scATAC VAE that is increasing with epoch
         chr_list: dictionary using chr as keys and corresponding peak index as vals
+        
 
         Parameters
         ----------
         input_dim_x: #genes, int
-        input_dim_y: #peak regions, int
-        batch_dim_x: dimension of batch matrix in RNA domain, int
-        batch_dim_y: dimension of batch matrix in ATAC domain, int
+        batch_dim_x: #batch factors in scRNA, int
+        chr_list: dictionary using chr as keys and corresponding peak index as vals
+        batch_dim_y: #batch factors in scATAC, int
+        input_dim_y: #peaks, int
+        d_time: dimension of time factor, int
         embed_dim: embedding dimension in VAEs, int
-        learning_rate_x: scRNA VAE learning rate, float
-        learning_rate_y: scATAC VAE learning rate, float
         nlayer: number of hidden layers in encoder/decoder, int, >=1
         dropout_rate: dropout rate in VAE, float
-        nlabel: nlabel to be predicted by discriminator
+        learning_rate_x: scRNA VAE learning rate, float
+        learning_rate_y: scATAC VAE learning rate, float
+        input_dim_y: dimension of scATAC input, int
+        batch_dim_y: dimension of scATAC batch factor, int
+        nlabel: number of labels to be predicted by discriminator, int
+        discriminator_weight: weight of the discriminator loss, float
+        mse_weight: weight of the mse loss, float
 
         """
         self.nlayer = nlayer;
@@ -80,6 +87,7 @@ class AEtimeMulti:
         self.chr_list = chr_list;
         self.learning_rate_y = learning_rate_y;
         self.nlabel = nlabel;
+        self.ncondition = ncondition;
         self.hidden_frac = 4;
 
         self.input_x = tf.placeholder(tf.float32, shape=[None, self.input_dim_x]);
@@ -95,18 +103,20 @@ class AEtimeMulti:
         self.time_y = tf.placeholder(tf.float32, shape=[None, self.d_time]);
         self.time_y_decoder = tf.placeholder(tf.float32, shape=[None, self.d_time]);
         self.kl_weight_y = tf.placeholder(tf.float32, None);
-
-
+        
+        print(self.ncondition)
         def encoder_rna(input_data, nlayer, hidden_frac=4, reuse=tf.AUTO_REUSE):
             """
             scRNA encoder
             Parameters
             ----------
-            hidden_frac: used to divide intermediate dimension to shrink the total paramater size to fit into memory
             input_data: generated from tf.concat([self.input_x, self.batch_x], 1), ncells x (input_dim_x + batch_dim_x)
+            nlayer: number of hidden layers in encoder, int, >=1
+            hidden_frac: used to divide intermediate dimension to shrink the total paramater size to fit into memory
+            reuse: whether to reuse the variables in the projector
             """
             with tf.variable_scope('encoder_x', reuse=tf.AUTO_REUSE):
-                self.intermediate_dim = int(math.sqrt((self.input_dim_x + self.batch_dim_x + self.d_time) * self.embed_dim)/hidden_frac) # TODO
+                self.intermediate_dim = int(math.sqrt((self.input_dim_x + self.batch_dim_x + self.d_time) * self.embed_dim)/hidden_frac)
                 l1 = tf.layers.Dense(self.intermediate_dim, activation=None, name='encoder_x_0')(input_data);
                 l1 = tf.contrib.layers.layer_norm(inputs=l1, center=True, scale=True);
                 l1 = tf.nn.leaky_relu(l1)
@@ -132,9 +142,10 @@ class AEtimeMulti:
             scRNA decoder
             Parameters
             ----------
+            encoded_data: generated from concatenation of the encoder output self.encoded_x and batch_x: tf.concat([self.encoded_x, self.batch_x], 1), ncells x (embed_dim + batch_dim_x)
             hidden_frac: intermadiate layer dim, used hidden_frac to shrink the size to fit into memory
             layer_norm_type: how we normalize layer, don't worry about it now
-            encoded_data: generated from concatenation of the encoder output self.encoded_x and batch_x: tf.concat([self.encoded_x, self.batch_x], 1), ncells x (embed_dim + batch_dim_x)
+            reuse: whether to reuse the variables in the projector
             """
 
             self.intermediate_dim = int(math.sqrt(self.input_dim_x* self.embed_dim )/hidden_frac);
@@ -157,6 +168,13 @@ class AEtimeMulti:
         def encoder_y(input_data, nlayer, chr_list, hidden_frac=4, reuse=tf.AUTO_REUSE):
             """
             scATAC encoder; to save memory, only allow within chromosome connections for the first several layers
+            Parameters
+            ----------
+            input_data: generated from tf.concat([self.input_y, self.batch_y, self.time_y], 1), ncells x (input_dim_y + batch_dim_y)
+            nlayer: number of hidden layers in encoder, int, >=1
+            chr_list: dictionary using chr as keys and corresponding peak index as vals
+            hidden_frac: used to divide intermediate dimension to shrink the total paramater size to fit into memory
+            reuse: whether to reuse the variables in the projector
             """
             with tf.variable_scope('encoder_y', reuse=tf.AUTO_REUSE):
                 dic_intermediate_dim = {}
@@ -195,6 +213,13 @@ class AEtimeMulti:
         def decoder_y(encoded_data, nlayer, chr_list, hidden_frac=4, reuse=tf.AUTO_REUSE):
             """
             scATAC decoder; to save memory, only allow within chromosome connections for the last several layers
+            Parameters
+            ----------
+            encoded_data: generated from concatenation of the encoder output self.encoded_y and batch_y: tf.concat([self.encoded_y, self.batch_y], 1), ncells x (embed_dim + batch_dim_y)
+            nlayer: number of hidden layers in encoder, int, >=1
+            chr_list: dictionary using chr as keys and corresponding peak index as vals
+            hidden_frac: used to divide intermediate dimension to shrink the total paramater size to fit into memory
+            reuse: whether to reuse the variables in the projector
             """
             with tf.variable_scope('decoder_y', reuse=tf.AUTO_REUSE):
                 l1 = tf.layers.Dense(self.embed_dim * 22, activation=None, name='Decoder_y_initial')(encoded_data);
@@ -227,6 +252,11 @@ class AEtimeMulti:
             """
             projector from cell factor + time factor to the time-encoded cell embedding
             shared across modalities to make sure cell embeddings and projected hidden layer are matched across modalities
+            Parameters
+            ----------
+            encoded_data: generated from tf.concat([self.encoded_x, self.time_x_decoder], 1), ncells x (embed_dim + d_time)
+            nlayer: number of hidden layers in projector, int, >=1
+            reuse: whether to reuse the variables in the projector
             """
             self.intermediate_dim = self.embed_dim *2;
             with tf.variable_scope('projector_x', reuse=tf.AUTO_REUSE):
@@ -247,6 +277,9 @@ class AEtimeMulti:
             Parameters
             ----------
             input_data: the VAE embeddings
+            nlayer: number of hidden layers in discriminator, int, >=1
+            nlabel: number of labels to be predicted by discriminator, int
+            reuse: whether to reuse the variables in the discriminator
             """
             with tf.variable_scope('discriminator_dx', reuse=tf.AUTO_REUSE):
                 l1 = tf.layers.Dense(int(math.sqrt(self.embed_dim * nlabel)), activation=None, name='discriminator_dx_0')(input_data);
@@ -272,16 +305,16 @@ class AEtimeMulti:
         self.px_z_m, self.px_z_v, self.encoded_x = encoder_rna(tf.concat([self.input_x, self.batch_x[:,:-self.nlabel], self.time_x], 1), self.nlayer, self.hidden_frac);
 
         ## scRNA reconstruction
-        self.px_projector = projector(tf.concat([self.encoded_x, self.time_x_decoder], 1), 1, self.hidden_frac)
-        self.px_scale, self.px_dropout, self.px_r = decoder_rna(tf.concat([self.px_projector, self.batch_x_decoder[:,:-self.nlabel]], 1), self.nlayer, self.hidden_frac);
+        self.px_projector = projector(tf.concat([self.encoded_x, self.time_x_decoder, self.batch_x_decoder[:,(-self.nlabel-self.ncondition):-self.nlabel]], 1), 1, self.hidden_frac) ## TODO: separate batch and condition, check out RNAAEDISv2mtimemm!!! For scRNA-seq alone, we don't need to separate batch and condition; for joint, we need, good thing is we currently don't have condition for the multi-omics data, so we can have a term added to the current model, when there is condition, we append it to z instead of the projected result. it won't change our current result, but will change the model with one or two lines. Need to modify annotations.
+        self.px_scale, self.px_dropout, self.px_r = decoder_rna(tf.concat([self.px_projector, self.batch_x_decoder[:,:(-self.nlabel-self.ncondition)]], 1), self.nlayer, self.hidden_frac);
         
         self.px_r = tf.clip_by_value(self.px_r, clip_value_min = -2000000, clip_value_max=15)
         self.px_r = tf.math.exp(self.px_r)
         self.reconstr_x = tf.transpose(tf.transpose(self.px_scale) *self.libsize_x)
         
         ## scRNA reconstruction (from mean)
-        self.px_projector_mean = projector(tf.concat([self.px_z_m, self.time_x_decoder], 1), 1, self.hidden_frac)
-        self.px_scale_mean, self.px_dropout_mean, self.px_r_mean = decoder_rna(tf.concat([self.px_projector_mean, self.batch_x_decoder[:,:-self.nlabel]], 1), self.nlayer, self.hidden_frac);
+        self.px_projector_mean = projector(tf.concat([self.px_z_m, self.time_x_decoder, self.batch_x_decoder[:,(-self.nlabel-self.ncondition):-self.nlabel]], 1), 1, self.hidden_frac)
+        self.px_scale_mean, self.px_dropout_mean, self.px_r_mean = decoder_rna(tf.concat([self.px_projector_mean, self.batch_x_decoder[:,:(-self.nlabel-self.ncondition)]], 1), self.nlayer, self.hidden_frac);
         
         self.reconstr_x_mean = tf.transpose(tf.transpose(self.px_scale_mean) *self.libsize_x)
         
@@ -299,13 +332,19 @@ class AEtimeMulti:
         self.libsize_y = tf.reduce_sum(self.input_y, 1) / 10000
         self.libsize_y = tf.clip_by_value(self.libsize_y, clip_value_min=0, clip_value_max=1)
 
-        self.py_z_m, self.py_z_v, self.encoded_y = encoder_y(tf.concat([self.input_y, self.batch_y, self.time_y], 1), self.nlayer, self.chr_list, self.hidden_frac, batch_dim_y);
+        self.py_z_m, self.py_z_v, self.encoded_y = encoder_y(tf.concat([self.input_y, self.batch_y, self.time_y], 1), self.nlayer, self.chr_list, self.hidden_frac);
         
         ## scATAC reconstruction
-        self.py_projector = projector(tf.concat([self.encoded_y, self.time_y_decoder], 1), 1, self.hidden_frac)
-        self.py = decoder_y(tf.concat([self.py_projector, self.batch_y_decoder], 1), self.nlayer, self.chr_list, self.hidden_frac);
-        self.py_projector_mean = projector(tf.concat([self.py_z_m, self.time_y_decoder], 1), 1, self.hidden_frac)
-        self.py_mean = decoder_y(tf.concat([self.py_projector_mean, self.batch_y_decoder], 1), self.nlayer, self.chr_list, self.hidden_frac);
+        if self.ncondition == 0:
+            self.py_projector = projector(tf.concat([self.encoded_y, self.time_y_decoder], 1), 1, self.hidden_frac)
+            self.py = decoder_y(tf.concat([self.py_projector, self.batch_y_decoder], 1), self.nlayer, self.chr_list, self.hidden_frac);
+            self.py_projector_mean = projector(tf.concat([self.py_z_m, self.time_y_decoder], 1), 1, self.hidden_frac)
+            self.py_mean = decoder_y(tf.concat([self.py_projector_mean, self.batch_y_decoder], 1), self.nlayer, self.chr_list, self.hidden_frac);
+        else:
+            self.py_projector = projector(tf.concat([self.encoded_y, self.time_y_decoder, self.batch_y_decoder[:,-self.ncondition:]], 1), 1, self.hidden_frac) #
+            self.py = decoder_y(tf.concat([self.py_projector, self.batch_y_decoder[:,:-self.ncondition]], 1), self.nlayer, self.chr_list, self.hidden_frac);
+            self.py_projector_mean = projector(tf.concat([self.py_z_m, self.time_y_decoder, self.batch_y_decoder[:,-self.ncondition:]], 1), 1, self.hidden_frac) #
+            self.py_mean = decoder_y(tf.concat([self.py_projector_mean, self.batch_y_decoder[:,:-self.ncondition]], 1), self.nlayer, self.chr_list, self.hidden_frac);
         self.reconstr_y = tf.transpose(tf.transpose(self.py) * self.libsize_y)
 
         ## scATAC loss
@@ -319,9 +358,12 @@ class AEtimeMulti:
         ## translation on co-assays
         ## ==========================
         ## translate to scRNA
-        self.px_projector_translator = projector(tf.concat([self.py_z_m, self.time_y_decoder], 1), 1, self.hidden_frac)
-        self.px_scale_translator, self.px_dropout_translator, self.px_r_translator = decoder_rna(tf.concat([self.px_projector_translator, self.batch_y_decoder], 1), self.nlayer, self.hidden_frac);
-        
+        if self.ncondition==0:
+            self.px_projector_translator = projector(tf.concat([self.py_z_m, self.time_y_decoder], 1), 1, self.hidden_frac)
+            self.px_scale_translator, self.px_dropout_translator, self.px_r_translator = decoder_rna(tf.concat([self.px_projector_translator, self.batch_y_decoder], 1), self.nlayer, self.hidden_frac);
+        else:
+            self.px_projector_translator = projector(tf.concat([self.py_z_m, self.time_y_decoder, self.batch_y_decoder[:,-self.ncondition:]], 1), 1, self.hidden_frac)
+            self.px_scale_translator, self.px_dropout_translator, self.px_r_translator = decoder_rna(tf.concat([self.px_projector_translator, self.batch_y_decoder[:,:-self.ncondition]], 1), self.nlayer, self.hidden_frac);
         self.px_r_translator = tf.clip_by_value(self.px_r_translator, clip_value_min = -2000000, clip_value_max=15)
         self.px_r_translator = tf.math.exp(self.px_r_translator)
         self.translator_reconstr_x = tf.transpose(tf.transpose(self.px_scale_translator) *self.libsize_x)
@@ -329,8 +371,8 @@ class AEtimeMulti:
         self.translator_loss_x = calc_zinb_loss(self.px_dropout_translator, self.px_r_translator, self.px_scale_translator, self.input_x, self.translator_reconstr_x)
 
         ## translate to scATAC
-        self.py_projector_translator = projector(tf.concat([self.px_z_m, self.time_x_decoder], 1), 1, self.hidden_frac)
-        self.py_translator = decoder_y(tf.concat([self.py_projector_translator, self.batch_x_decoder[:,:-self.nlabel]], 1), self.nlayer, self.chr_list, self.hidden_frac);
+        self.py_projector_translator = projector(tf.concat([self.px_z_m, self.time_x_decoder, self.batch_x_decoder[:,(-self.nlabel-self.ncondition):-self.nlabel]], 1), 1, self.hidden_frac)
+        self.py_translator = decoder_y(tf.concat([self.py_projector_translator, self.batch_x_decoder[:,:(-self.nlabel-self.ncondition)]], 1), self.nlayer, self.chr_list, self.hidden_frac);
         self.translator_reconstr_y = tf.transpose(tf.transpose(self.py_translator) *self.libsize_y)
         
         self.translator_loss_y = bce(self.input_y, self.translator_reconstr_y)* self.input_dim_y;
@@ -371,7 +413,39 @@ class AEtimeMulti:
         """
         train in four steps, in each step, part of neural network is optimized meanwhile other layers are frozen.
         early stopping based on tolerance (patience) and maximum epochs defined in each step
-        sep_train_index: 1: train scRNA autoencoder; 2: train scATAC autoencoder; 3: minimize discriminator of scRNA and scATAC
+        Parameters
+        ----------
+        output_model: output model directory, str
+        data_x: scRNA expression, ncell x input_dim_x, float
+        batch_x: scRNA batch factor, ncell x batch_dim_x, int
+        data_x_val: scRNA validation expression, ncell x input_dim_x, float
+        batch_x_val: scRNA validation batch factor, ncell x batch_dim_x, int
+        data_y: scATAC expression, ncell x input_dim_y, float
+        batch_y: scATAC batch factor, ncell x batch_dim_y, int
+        data_y_val: scATAC validation expression, ncell x input_dim_y, float
+        batch_y_val: scATAC validation batch factor, ncell x batch_dim_y, int
+        data_x_co: scRNA co-assay expression, ncell x input_dim_x, float
+        data_y_co: scATAC co-assay expression, ncell x input_dim_y, float
+        batch_x_co: scRNA co-assay batch factor, ncell x batch_dim_x, int
+        batch_y_co: scATAC co-assay batch factor, ncell x batch_dim_y, int
+        data_x_val_co: scRNA validation co-assay expression, ncell x input_dim_x, float
+        data_y_val_co: scATAC validation co-assay expression, ncell x input_dim_y, float
+        batch_x_val_co: scRNA validation co-assay batch factor, ncell x batch_dim_x, int
+        batch_y_val_co: scATAC validation co-assay batch factor, ncell x batch_dim_y, int
+        batch_size: batch size for training, int
+        nlayer: number of hidden layers in encoder/decoder, int, >=1
+        d_time: dimension of time factor, int
+        dropout_rate: dropout rate in VAE, float
+
+        Returns
+        ----------
+        iter_list: list of iterations
+        val_reconstr_x_loss_list: validation reconstruction loss of scRNA
+        val_kl_x_loss_list: validation KL loss of scRNA
+        val_reconstr_y_loss_list: validation reconstruction loss of scATAC
+        val_kl_y_loss_list: validation KL loss of scATAC
+        val_translator_xy_loss_list: validation translation loss from scATAC to scRNA
+        val_translator_yx_loss_list: validation translation loss from scRNA to scATAC
 
         """
         iter_list = []
@@ -434,7 +508,6 @@ class AEtimeMulti:
                     data_x_i = data_x[(batch_size*batch_id) : min(batch_size*(batch_id+1), data_x.shape[0]),].todense()
                     batch_x_i = batch_x[(batch_size*batch_id) : min(batch_size*(batch_id+1), data_x.shape[0]),]
                     self.sess.run(self.optimizer_x, feed_dict={self.input_x: data_x_i, self.batch_x: batch_x_i[:,d_time:], self.time_x: batch_x_i[:,:d_time], self.batch_x_decoder: batch_x_i[:,d_time:], self.time_x_decoder: batch_x_i[:,:d_time], self.kl_weight_x: kl_weight_x_update, self.input_y: np.zeros(shape=(data_x_i.shape[0], data_y.shape[1]), dtype=np.int32), self.batch_y: np.zeros(shape=(data_x_i.shape[0], batch_y.shape[1]-d_time), dtype=np.int32), self.time_y: np.zeros(shape=(data_x_i.shape[0], d_time), dtype=np.int32), self.batch_y_decoder: np.zeros(shape=(data_x_i.shape[0], batch_y.shape[1]-d_time), dtype=np.int32), self.time_y_decoder: np.zeros(shape=(data_x_i.shape[0], d_time)), self.kl_weight_y: kl_weight_y_update});
-
                 ## scATAC-seq reconstruction and translation
                 for batch_id in range(nbatch_co): #no oversampling compared to the previous version, since now the model converges very fast!
                     data_y_i = data_y_co[(batch_size*batch_id) : batch_size*(batch_id+1),].todense()
@@ -509,30 +582,102 @@ class AEtimeMulti:
     def predict_embedding(self, data_x, batch_x, data_y, batch_y, d_time):
         """
         return scRNA and scATAC projections on VAE embedding layers 
+        Parameters
+        ----------
+        data_x: scRNA expression, ncell x input_dim_x, float
+        batch_x: scRNA batch factor, ncell x batch_dim_x, int
+        data_y: scATAC expression, ncell x input_dim_y, float
+        batch_y: scATAC batch factor, ncell x batch_dim_y, int
+        d_time: dimension of time factor, int
+        Returns
+        ----------
+        px_z_m: scRNA VAE embedding, ncell x embed_dim
+        py_z_m: scATAC VAE embedding, ncell x embed_dim
         """
         return self.sess.run([self.px_z_m, self.py_z_m], feed_dict={self.input_x: data_x, self.batch_x: batch_x[:,d_time:], self.time_x: batch_x[:,:d_time], self.batch_x_decoder: batch_x[:,d_time:], self.time_x_decoder: batch_x[:,:d_time], self.kl_weight_x: 1, self.input_y: data_y, self.batch_y: batch_y[:,d_time:], self.time_y: batch_y[:,:d_time], self.batch_y_decoder: batch_y[:,d_time:], self.time_y_decoder: batch_y[:,:d_time], self.kl_weight_y: 1});
 
     def predict_rnanorm(self, data_x, batch_x, batch_x_decoder, data_y, batch_y, batch_y_decoder, d_time):
         """
         return scRNA rescaled profile (normalized) based on scRNA input
+        Parameters
+        ----------
+        data_x: scRNA expression, ncell x input_dim_x, float
+        batch_x: scRNA batch factor, ncell x batch_dim_x, int
+        batch_x_decoder: scRNA batch factor to be switch to, same format as batch_x
+        data_y: scATAC expression, ncell x input_dim_y, float
+        batch_y: scATAC batch factor, ncell x batch_dim_y, int
+        batch_y_decoder: scATAC batch factor to be switch to, same format as batch_y
+        d_time: dimension of time factor, int
+        Returns
+        ----------
+        px_scale_mean: scRNA rescaled profile (normalized) by varying time factor, predicted based on scRNA input
+
         """
         return self.sess.run(self.px_scale_mean, feed_dict={self.input_x: data_x, self.batch_x: batch_x[:,d_time:], self.time_x: batch_x[:,:d_time], self.batch_x_decoder: batch_x_decoder[:,d_time:], self.time_x_decoder: batch_x_decoder[:,:d_time], self.kl_weight_x: 1, self.input_y: data_y, self.batch_y: batch_y[:,d_time:], self.time_y: batch_y[:,:d_time], self.batch_y_decoder: batch_y_decoder[:,d_time:], self.time_y_decoder: batch_y_decoder[:,:d_time], self.kl_weight_y: 1});
         
     def predict_atacnorm(self, data_x, batch_x, batch_x_decoder, data_y, batch_y, batch_y_decoder, d_time):
         """
         return scATAC rescaled profile (normalized) by varying time factor, predicted based on scATAC input
+        Parameters
+        ----------
+        data_x: scRNA expression, ncell x input_dim_x, float
+        batch_x: scRNA batch factor, ncell x batch_dim_x, int
+        batch_x_decoder: scRNA batch factor to be switch to, same format as batch_x
+        data_y: scATAC expression, ncell x input_dim_y, float
+        batch_y: scATAC batch factor, ncell x batch_dim_y, int
+        batch_y_decoder: scATAC batch factor to be switch to, same format as batch_y
+        d_time: dimension of time factor, int
+        Returns
+        ----------
+        py_mean: scATAC rescaled profile (normalized) by varying time factor, predicted based on scATAC input
+
         """
         return self.sess.run(self.py_mean, feed_dict={self.input_x: data_x, self.batch_x: batch_x[:,d_time:], self.time_x: batch_x[:,:d_time], self.batch_x_decoder: batch_x_decoder[:,d_time:], self.time_x_decoder: batch_x_decoder[:,:d_time], self.kl_weight_x: 1, self.input_y: data_y, self.batch_y: batch_y[:,d_time:], self.time_y: batch_y[:,:d_time], self.batch_y_decoder: batch_y_decoder[:,d_time:], self.time_y_decoder: batch_y_decoder[:,:d_time], self.kl_weight_y: 1});
         
     def predict_atacnorm_trans(self, data_x, batch_x, batch_x_decoder, data_y, batch_y, batch_y_decoder, d_time):
         """
         return scATAC rescaled profile (normalized) by varying time factor, predicted based on scRNA input
+        Parameters
+        ----------
+        data_x: scRNA expression, ncell x input_dim_x, float
+        batch_x: scRNA batch factor, ncell x batch_dim_x, int
+        batch_x_decoder: scRNA batch factor to be switch to, same format as batch_x
+        data_y: scATAC expression, ncell x input_dim_y, float
+        batch_y: scATAC batch factor, ncell x batch_dim_y, int
+        batch_y_decoder: scATAC batch factor to be switch to, same format as batch_y
+        d_time: dimension of time factor, int
+        Returns
+        ----------
+        py_translator: scATAC rescaled profile (normalized) by varying time factor, predicted based on scRNA input
+
         """
         return self.sess.run(self.py_translator, feed_dict={self.input_x: data_x, self.batch_x: batch_x[:,d_time:], self.time_x: batch_x[:,:d_time], self.batch_x_decoder: batch_x_decoder[:,d_time:], self.time_x_decoder: batch_x_decoder[:,:d_time], self.kl_weight_x: 1, self.input_y: data_y, self.batch_y: batch_y[:,d_time:], self.time_y: batch_y[:,:d_time], self.batch_y_decoder: batch_y_decoder[:,d_time:], self.time_y_decoder: batch_y_decoder[:,:d_time], self.kl_weight_y: 1});
         
     def get_losses_all(self, data_x, batch_x, kl_weight_x, data_y, batch_y, kl_weight_y, d_time):
         """
         return various losses
+        Parameters
+        ----------
+        data_x: scRNA expression, ncell x input_dim_x, float
+        batch_x: scRNA batch factor, ncell x batch_dim_x, int
+        kl_weight_x: kl weight of the scRNA VAE that is increasing with epoch
+        data_y: scATAC expression, ncell x input_dim_y, float
+        batch_y: scATAC batch factor, ncell x batch_dim_y, int
+        kl_weight_y: kl weight of the scATAC VAE that is increasing with epoch
+        d_time: dimension of time factor, int
+        Returns
+        ----------
+        loss_x: total loss of scRNA VAE
+        reconstr_loss_x: reconstruction loss of scRNA VAE
+        kld_loss_x: KL loss of scRNA VAE
+        loss_y: total loss of scATAC VAE
+        reconstr_loss_y: reconstruction loss of scATAC VAE
+        kld_loss_y: KL loss of scATAC VAE
+        discriminator_loss: discriminator loss
+        translator_loss_y: translation loss from scATAC to scRNA
+        translator_loss_x: translation loss from scRNA to scATAC
+        mse_embedding: MSE loss between scRNA and scATAC embeddings
+
         """
         return self.sess.run([self.loss_x, self.reconstr_loss_x, self.kld_loss_x, self.loss_y, self.reconstr_loss_y, self.kld_loss_y, self.discriminator_loss, self.translator_loss_y, self.translator_loss_x, self.mse_embedding], feed_dict={self.input_x: data_x, self.batch_x: batch_x[:,d_time:], self.time_x: batch_x[:,:d_time], self.batch_x_decoder: batch_x[:,d_time:], self.time_x_decoder: batch_x[:,:d_time], self.kl_weight_x: kl_weight_x, self.input_y: data_y, self.batch_y: batch_y[:,d_time:], self.time_y: batch_y[:,:d_time], self.batch_y_decoder: batch_y[:,d_time:], self.time_y_decoder: batch_y[:,:d_time], self.kl_weight_y: kl_weight_y});
 
@@ -547,7 +692,7 @@ class AEtimeMulti:
 
 
 class AEtimeRNA:
-    def __init__(self, input_dim_x, batch_dim_x, embed_dim_x, nlayer, dropout_rate, output_model, learning_rate_x, nlabel=1, discriminator_weight=1):
+    def __init__(self, input_dim_x, batch_dim_x, embed_dim_x, nlayer, dropout_rate, output_model, learning_rate_x, nlabel=1, discriminator_weight=1, train_ver=''):
         """
         Network architecture and optimization
 
@@ -570,6 +715,7 @@ class AEtimeRNA:
         dropout_rate: dropout rate in VAE, float
         nlabel: nlabel to be predicted by discriminator
         discriminator_weight: discriminator weight in loss
+        train_ver: version of training model. Set train_ver to simulation when training on simulated data.
 
         """
         self.input_dim_x = input_dim_x;
@@ -590,8 +736,9 @@ class AEtimeRNA:
             scRNA encoder
             Parameters
             ----------
-            hidden_frac: used to divide intermediate dimension to shrink the total paramater size to fit into memory
             input_data: generated from tf.concat([self.input_x, self.batch_x], 1), ncells x (input_dim_x + batch_dim_x)
+            nlayer: number of hidden layers in encoder, int, >=1
+            hidden_frac: used to divide intermediate dimension to shrink the total paramater size to fit into memory
             """
             with tf.variable_scope('encoder_x', reuse=tf.AUTO_REUSE):
                 self.intermediate_dim = int(math.sqrt((self.input_dim_x + self.batch_dim_x) * self.embed_dim_x)/hidden_frac)
@@ -615,12 +762,14 @@ class AEtimeRNA:
                 return encoder_output_mean, encoder_output_var, encoder_output_z;
             
 
-        def decoder_rna(encoded_data, nlayer, hidden_frac=2, reuse=tf.AUTO_REUSE):
+        def decoder_rna(encoded_data, nlayer, hidden_frac=2, train_ver='lib', reuse=tf.AUTO_REUSE):
             """
             scRNA decoder
             Parameters
             ----------
             encoded_data: generated from concatenation of the encoder output self.encoded_x and batch_x: tf.concat([self.encoded_x, self.batch_x], 1), ncells x (embed_dim_x + batch_dim_x)
+            nlayer: number of hidden layers in decoder, int, >=1
+            hidden_frac: used to divide intermediate dimension to shrink the total paramater size to fit into memory
             """
 
             self.intermediate_dim = int(math.sqrt((self.input_dim_x + self.batch_dim_x) * self.embed_dim_x)/hidden_frac);
@@ -633,7 +782,10 @@ class AEtimeRNA:
                     l1 = tf.contrib.layers.layer_norm(inputs=l1, center=True, scale=True);
                     l1 = tf.nn.leaky_relu(l1)
                 px = tf.layers.Dense(self.intermediate_dim, activation=tf.nn.relu, name='decoder_x_px')(l1);
-                px_scale = tf.layers.Dense(self.input_dim_x, activation=tf.nn.softmax, name='decoder_x_px_scale')(px);
+                if train_ver == 'simulation':
+                    px_scale = tf.layers.Dense(self.input_dim_x, activation=tf.nn.softplus, name='decoder_x_px_scale')(px);
+                else:
+                    px_scale = tf.layers.Dense(self.input_dim_x, activation=tf.nn.softmax, name='decoder_x_px_scale')(px);
                 px_dropout = tf.layers.Dense(self.input_dim_x, activation=None, name='decoder_x_px_dropout')(px) 
                 px_r = tf.layers.Dense(self.input_dim_x, activation=None, name='decoder_x_px_r')(px)
                     
@@ -646,6 +798,8 @@ class AEtimeRNA:
             Parameters
             ----------
             input_data: the VAE embeddings
+            nlayer: number of hidden layers in discriminator, int, >=1
+            nlabel: number of labels to be predicted by discriminator, int
             """
             with tf.variable_scope('discriminator_dx', reuse=tf.AUTO_REUSE):
                 l1 = tf.layers.Dense(int(math.sqrt(self.embed_dim_x * nlabel)), activation=None, name='discriminator_dx_0')(input_data);
@@ -663,7 +817,10 @@ class AEtimeRNA:
                 return output;
             
 
-        self.libsize_x = tf.reduce_sum(self.input_x, 1)
+        if train_ver == 'simulation':
+            self.libsize_x = 1
+        else:
+            self.libsize_x = tf.reduce_sum(self.input_x, 1)
         
         self.px_z_m, self.px_z_v, self.encoded_x = encoder_rna(tf.concat([self.input_x, self.batch_x[:,:-self.nlabel]], 1), self.nlayer);
 
@@ -713,8 +870,25 @@ class AEtimeRNA:
         """
         train in two steps, in each step, part of neural network is optimized meanwhile other layers are frozen.
         early stopping based on tolerance (patience) and maximum epochs defined in each step
-        iter: document the niter for scATAC autoencoder, once it reaches nepoch_klstart_y, KL will start to warm up
-        n_iter_step2: document the niter for scRNA autoencoder, once it reaches nepoch_klstart_x, KL will start to warm up
+        Parameters
+        ----------
+        output_model: output model folder, str
+        data_x: scRNA expression, ncell x input_dim_x, float
+        batch_x: scRNA batch factor, ncell x batch_dim_x, int
+        data_x_val: scRNA validation expression, ncell x input_dim_x, float
+        batch_x_val: scRNA validation batch factor, ncell x batch_dim_x, int
+        batch_size: batch size for training, int
+        nlayer: number of hidden layers in encoder/decoder, int, >=1
+        dropout_rate: dropout rate in VAE, float
+        Returns
+        ----------
+        iter_list: list of iterations
+        val_reconstr_x_loss_list: validation reconstruction loss of scRNA
+        val_kl_x_loss_list: validation KL loss of scRNA
+        reconstr_x_loss_list: training reconstruction loss of scRNA
+        kl_x_loss_list: training KL loss of scRNA
+        discriminator_x_loss_list: training discriminator loss of scRNA
+        val_discriminator_x_loss_list: validation discriminator loss of scRNA
 
         """
         val_reconstr_x_loss_list = [];
@@ -877,18 +1051,45 @@ class AEtimeRNA:
     def predict_embedding(self, data_x, batch_x):
         """
         return scRNA VAE embeddings
+        Parameters
+        ----------
+        data_x: scRNA expression, ncell x input_dim_x, float
+        batch_x: scRNA batch factor, ncell x batch_dim_x, int
+        Returns
+        ----------
+        px_z_m: scRNA VAE embeddings, ncell x embed_dim_x, float
         """
         return self.sess.run(self.px_z_m, feed_dict={self.input_x: data_x, self.batch_x: batch_x, self.batch_x_decoder: batch_x});
 
     def predict_rnanorm(self, data_x, batch_x, batch_x_decoder):
         """
         return scRNA rescaled profile (normalized) with new time or condition specified in batch_x_decoder
+        Parameters
+        ----------
+        data_x: scRNA expression, ncell x input_dim_x, float
+        batch_x: scRNA batch factor, ncell x batch_dim_x, int
+        batch_x_decoder: scRNA batch factor to be switch to, same format as batch_x
+        Returns
+        ----------
+        px_scale_mean: scRNA rescaled profile (normalized) by varying time factor, predicted based on scRNA input
         """
         return self.sess.run(self.px_scale_mean, feed_dict={self.input_x: data_x, self.batch_x: batch_x, self.batch_x_decoder: batch_x_decoder});
         
     def get_losses_rna(self, data_x, batch_x, batch_x_decoder, kl_weight_x):
         """
         return various losses
+        Parameters
+        ----------
+        data_x: scRNA expression, ncell x input_dim_x, float
+        batch_x: scRNA batch factor, ncell x batch_dim_x, int
+        batch_x_decoder: scRNA batch factor to be switch to, same format as batch_x
+        kl_weight_x: kl weight of the scRNA VAE that is increasing with epoch
+        Returns
+        ----------
+        loss_x: total loss of scRNA VAE
+        reconstr_loss_x: reconstruction loss of scRNA VAE
+        kld_loss_x: KL loss of scRNA VAE
+        discriminator_loss: discriminator loss
         """
         return self.sess.run([self.loss_x, self.reconstr_loss_x, self.kld_loss_x, self.discriminator_loss], feed_dict={self.input_x: data_x, self.batch_x: batch_x, self.batch_x_decoder: batch_x_decoder, self.kl_weight_x: kl_weight_x});
 
@@ -902,12 +1103,26 @@ class AEtimeRNA:
         saver.restore(self.sess, tf.train.latest_checkpoint(restore_folder+'/'))
 
 
+
 ## ============================================================
 ## other functions for data/model preparation
 ## ============================================================
 
 ## Zero-inflated negative binomial loss
 def calc_zinb_loss(px_dropout, px_r, px_scale, input_x, reconstr_x):
+    """
+    Calculate the loss for zero-inflated negative binomial distribution.
+    Parameters
+    ----------
+    px_dropout: dropout parameter, ncell x input_dim_x, float
+    px_r: dispersion parameter, ncell x input_dim_x, float
+    px_scale: scale parameter, ncell x input_dim_x, float
+    input_x: scRNA expression, ncell x input_dim_x, float
+    reconstr_x: reconstructed scRNA expression, ncell x input_dim_x, float
+    Returns
+    ----------
+    zinb_loss: loss for zero-inflated negative binomial distribution, float
+    """
     softplus_pi = tf.nn.softplus(-px_dropout)  #  uses log(sigmoid(x)) = -softplus(-x)
     log_theta_eps = tf.log(px_r + 1e-8)
     log_theta_mu_eps = tf.log(px_r + reconstr_x + 1e-8)
@@ -927,8 +1142,8 @@ def calc_zinb_loss(px_dropout, px_r, px_scale, input_x, reconstr_x):
     mul_case_non_zero = tf.multiply(tf.dtypes.cast(input_x > 1e-8, tf.float32), case_non_zero)
 
     res = mul_case_zero + mul_case_non_zero
-    translator_loss_x = - tf.reduce_mean(tf.reduce_sum(res, axis=1))
-    return(translator_loss_x)
+    zinb_loss = - tf.reduce_mean(tf.reduce_sum(res, axis=1))
+    return(zinb_loss)
 
 
 ## positional encoding
@@ -939,6 +1154,17 @@ def get_angles(pos, i, d_model):
 
 
 def positional_encoding(time, d_model, time_magnitude=1):
+    """
+    Get sinusoidal encoding of query time
+    Parameters
+    ----------
+    time: time, float
+    d_model: dimension of sinusoidal encoding, int
+    time_magnitude: parameter for to define wavelength of sinusoidal encoding, float
+    Returns
+    ----------
+    sinusoidal encoding of the corresponding time
+    """
     angle_rads = get_angles(time * time_magnitude,
                           np.arange(d_model)[np.newaxis, :],
                           d_model)
@@ -952,6 +1178,16 @@ def positional_encoding(time, d_model, time_magnitude=1):
 
 
 def convert_batch_to_onehot(input_dataset_list, dataset_list):
+    """
+    Convert batch info to one-hot-encoding
+    Parameters
+    ----------
+    input_dataset_list: input batch info, list
+    dataset_list: reference batches, list
+    Returns
+    ----------
+    coo matrix of one-hot-encoded batch
+    """
     dic_dataset_index = {}
     for i in range(len(dataset_list)):
         dic_dataset_index[dataset_list[i]] = i
@@ -964,6 +1200,17 @@ def convert_batch_to_onehot(input_dataset_list, dataset_list):
 
 
 def randomize_adata(rna_data, randseed):
+    """
+    Randomize row orders of rna_data
+    Parameters
+    ----------
+    rna_data: input, h5ad
+    randseed: random seed index, int
+    Returns
+    ----------
+    data_mat: csr matrix of gene expression
+    batch_mat: numpy matrix of batch information
+    """
     data_index = list(range(rna_data.shape[0]))
     random.seed(randseed)
     random.shuffle(data_index)
@@ -973,17 +1220,44 @@ def randomize_adata(rna_data, randseed):
 
 
 def process_adata(rna_h5ad, atac_h5ad, domain, batch, condition, d_time, time_magnitude_float):
+    """
+    Preprocess adata file so that they can be used as input to the model
+    ----------
+    rna_h5ad: path to scRNA-seq h5ad file
+    atac_h5ad: path to scATAC-seq h5ad file
+    domain: 'rna' (rna only) or 'multi' (for multimodal)
+    batch: batch column name in anndata
+    d_time: number of time points
+    time_magnitude_float: time magnitude in radians
+    Returns
+    ----------
+    rna_data: adata file for RNA
+    atac_data: adata file for ATAC
+    nlabel: number of unique time points, used to determine number of labels to distinguish in discriminator
+    ncondition: number of condition encoding, used for separating batch and condition encoding
+    """
     ## identify batch and condition column
-    rna_data = ad.read_h5ad(rna_h5ad)
-    rna_data.obs['time'] = rna_data.obs['time'].astype(float)
+    if rna_h5ad.endswith("h5ad"):
+        rna_data = ad.read_h5ad(rna_h5ad)
+    else:
+        with open(rna_h5ad + "_X.txt") as your_data:
+            rna_data = ad.read_csv(your_data, delimiter='\t')
 
+        rna_data.X = scipy.sparse.csr_matrix(rna_data.X)
+        rna_data.obs = pd.read_csv(rna_h5ad + "_obs.txt", sep='\t')
+        rna_data.var = pd.read_csv(rna_h5ad + "_var.txt", sep='\t')
+    rna_data.obs['time'] = rna_data.obs['time'].astype(float)
+    rna_data.obs.index = rna_data.obs.index.astype(str)
     if domain=='multi':
         atac_data = ad.read_h5ad(atac_h5ad)
         atac_data.obs['time'] = atac_data.obs['time'].astype(float)
+        rna_data.obs['sex'] = 'F' ## TODO, remove, used for testing multiome data
+        atac_data.obs['sex'] = 'F' ## TODO, remove, used for testing multiome data
+        atac_data.obs.index = atac_data.obs.index.astype(str)
         chr_list = {}
         for chri in atac_data.var.chr.unique():
             chr_list[chri] = [i for i, x in enumerate(atac_data.var['chr']) if x == chri];
-    if batch != '':
+    if batch != '': #if we specified a column as batch
         rna_data.obs['batch'] = rna_data.obs[batch]
         if domain=='multi':
             atac_data.obs['batch'] = atac_data.obs[batch]
@@ -991,13 +1265,16 @@ def process_adata(rna_h5ad, atac_h5ad, domain, batch, condition, d_time, time_ma
         else:
             batch_list = list(set(rna_data.obs.batch.unique()))
             
-    if condition != '':
+    if condition != '': #if we specified a column as condition
         rna_data.obs['condition'] = rna_data.obs[condition]
         if domain=='multi':
             atac_data.obs['condition'] = atac_data.obs[condition]
             condition_list = list(set(rna_data.obs.condition.unique()) | set(atac_data.obs.condition.unique()))
         else:
             condition_list = list(set(rna_data.obs.condition.unique()))
+        ncondition = len(condition_list)
+    else:
+        ncondition = 0
     
     ## build batch, condition and time encoding
     time_encoding = positional_encoding(np.reshape(np.array(rna_data.obs.time), (rna_data.shape[0], 1)), d_time, time_magnitude_float)
@@ -1009,6 +1286,7 @@ def process_adata(rna_h5ad, atac_h5ad, domain, batch, condition, d_time, time_ma
         atac_data.obsm['encoding'] = time_encoding
     else:
         atac_data = ''
+
     if batch != '':
         batch_encoding = pd.DataFrame(convert_batch_to_onehot(list(rna_data.obs.batch), dataset_list=batch_list).todense())
         batch_encoding.index = rna_data.obs.index
@@ -1027,23 +1305,31 @@ def process_adata(rna_h5ad, atac_h5ad, domain, batch, condition, d_time, time_ma
             batch_encoding.index = atac_data.obs.index
             atac_data.obsm['encoding'] = pd.concat([atac_data.obsm['encoding'], batch_encoding], axis=1)
     
-    ## append time as a label so that we build discriminator to correct time from cell identity factors in the reference domain
+    ## append time as a label so that we build discriminator to correct time from cell identity factors in the reference domain. only apply this to RNA
     append_encoding = pd.DataFrame(convert_batch_to_onehot(list(rna_data.obs.time), dataset_list=list(rna_data.obs.time.unique())).todense())
     append_encoding.index = rna_data.obs.index
     rna_data.obsm['encoding'] = pd.concat([rna_data.obsm['encoding'], append_encoding], axis=1)
     nlabel = append_encoding.shape[1]
-    
-    return rna_data, atac_data, nlabel
+    return rna_data, atac_data, nlabel, ncondition
 
 
 ## ============================================================
 ## other functions for output evaluation and application
 ## ============================================================
 
-
 def normalize_raw(x, logscale=True, norm = 'norm', bulk=False, scale=10000):
     """
     return normalized profile
+    Parameters
+    ----------
+    x: input profile, list or numpy array
+    logscale: if True, return log1p(x*scale), default True
+    norm: 'norm' or 'bulk', if 'norm', normalize each cell, if 'bulk', normalize the whole profile
+    bulk: if True, normalize the whole profile, if False, normalize each cell
+    scale: scaling factor for log1p, default 10000
+    Returns
+    ----------
+    normalized profile as a list
     """
     x = np.asarray(x)
     if bulk:
@@ -1182,7 +1468,19 @@ def lmean(x):
         return sum(x)/len(x)
 
 
-def get_neighbor_timepoints(timepoints, timepoint, nearest='close'):
+def get_neighbor_timepoints(timepoints, timepoint):
+    """
+    get neighboring timepoints for a given timepoint
+    
+    Parameters
+    ----------
+    timepoints: list of timepoints, e.g. [0, 1, 2, 3]
+    timepoint: a timepoint, e.g. 2
+    nearest: 'close' or 'far', if 'close', return the previous and next timepoint, if 'far', return the first and last timepoint
+    Returns
+    ----------
+    neighboring_timepoints: list of neighboring timepoints, e.g. [1, 3] or [0, 3]
+    """
     timepoints = set(timepoints)
     timepoints.add(timepoint)
     timepoints = list(timepoints)
@@ -1196,34 +1494,25 @@ def get_neighbor_timepoints(timepoints, timepoint, nearest='close'):
         next_timepoint = float("nan")
     else:
         next_timepoint = timepoints[timepoint_index+1]
-    if nearest == 'close':
-        neighboring_timepoints = [prev_timepoint, next_timepoint]
-    else:
-        neighboring_timepoints = [timepoints[1],timepoints[-2]]
+    neighboring_timepoints = [prev_timepoint, next_timepoint]
     return neighboring_timepoints
 
 
 def compute_pairwise_distances(x, y):
     """
-    compute pairwise distance for x and y, used for FOSCTTM distance calculation
+    compute pairwise distance for x and y
+    Parameters
+    ----------
+    x: numpy array of shape (n_samples_x, n_features)
+    y: numpy array of shape (n_samples_y, n_features)
+    Returns
+    ----------
+    diff: numpy array of shape (n_samples_x, n_samples_y), pairwise squared Euclidean distances
     """
     x = np.expand_dims(x, 2)
     y = np.expand_dims(y.T, 0)
     diff = np.sum(np.square(x - y), 1)
     return diff
-
-
-def NestedDictValues(d, dic, stage):
-    for v in dic[d]:
-        if v in set(dic.keys()):
-            #stagei = dic[v][0].split(':')[0][1:]
-            stagei = v.split(':')[0]
-            stagei_float = convert_stage_float(stagei)
-            stage_float = convert_stage_float(stage)
-            if stagei_float<stage_float:
-                yield from NestedDictValues(v, dic, stage)
-            else:
-                yield v
 
 
 def normalize_scrna(x, logscale=True, norm = 'norm', bulk=False):
@@ -1295,6 +1584,24 @@ def crosscorr(datax, datay, lag=0, wrap=False):
 
 
 def pred_expression(autoencoder, data_x_seed, timepoint_seed, time_step, time_range, d_time, time_magnitude, dataset):
+    """
+    predict gene expression for a seed cell at different time points
+    Parameters
+    ----------
+    autoencoder: trained autoencoder model
+    data_x_seed: seed cell data, AnnData object
+    timepoint_seed: seed time point
+    time_step: time step for prediction
+    time_range: range of time points to predict
+    d_time: dimension of time encoding
+    time_magnitude: magnitude of time encoding
+    dataset: dataset name for saving results
+    Returns
+    ----------
+    timepoint_pred_list: list of predicted time points
+    allArrays: numpy array of predicted gene expression for each time point
+    """
+
     allArrays = np.empty((0, data_x_seed.shape[1]))
     timepoint_pred_list = []
     for i in range(0, 10000):
@@ -1312,6 +1619,22 @@ def pred_expression(autoencoder, data_x_seed, timepoint_seed, time_step, time_ra
 def calc_temporal_exp(sim_url, autoencoder, domain, rna_data, atac_data, ct_query, timepoint_seed, time_step, time_range, d_time, time_magnitude_float):
     '''
     derive temporal gene expression trend for a query cell
+    Parameters
+    ----------
+    sim_url: url to save the results
+    autoencoder: trained autoencoder model
+    domain: 'rna' or 'multi', if 'rna', only predict gene expression, if 'multi', predict both gene expression and accessibility
+    rna_data: scRNA-seq data, AnnData object
+    atac_data: scATAC-seq data, AnnData object, only used if domain is 'multi'
+    ct_query: cell type query
+    timepoint_seed: seed time point for prediction
+    time_step: time step for prediction
+    time_range: range of time points to predict
+    d_time: dimension of time encoding
+    time_magnitude_float: magnitude of time encoding
+    Returns
+    ----------
+    None, but saves the predicted gene expression and accessibility in numpy files
     '''
     data_x_seed = rna_data[(rna_data.obs.time==timepoint_seed) & (rna_data.obs.celltype==ct_query),]
     if data_x_seed.shape[0]>50:
@@ -1355,10 +1678,26 @@ def calc_temporal_exp(sim_url, autoencoder, domain, rna_data, atac_data, ct_quer
         np.save(sim_url + ct_query + 'time' + str(timepoint_seed) + '_'+ str(time_step) + '_' + str(time_range) + '_acc.npy', dic_peak)
 
 
-def calc_embedding(autoencoder, rna_data, atac_data, batch_size, d_time, method, domain, sim_url, celltype_i='', nk=25):
+def calc_embedding(autoencoder, rna_data, atac_data, batch_size, d_time, method, domain, sim_url, celltype_i=''):
     """
     predict cell embeddings
-    return LISI score or cell embeddings for UMAP
+    return LISI score or cell embeddings
+    Parameters
+    ----------
+    autoencoder: trained autoencoder model
+    rna_data: scRNA-seq data, AnnData object
+    atac_data: scATAC-seq data, AnnData object, only used if domain is 'multi'
+    batch_size: batch size for prediction
+    d_time: dimension of time encoding
+    method: 'lisi' or 'embedding', if 'lisi', return LISI score; oif 'embedding', return cell embeddings
+    domain: 'rna' or 'multi', if 'rna', only predict scRNA embeddings, if 'multi', predict both scRNA and scATAC embeddings
+    sim_url: url to save the results
+    celltype_i: cell type query, if not empty, only predict embeddings for this cell type
+    Returns
+    ----------
+    sc_combined_embedding: numpy array of shape (n_cells, n_features), if method is 'embedding'
+    lisi_score_vec: list of LISI scores for time, batch and data domain, if method is 'lisi'
+
     """
     id_label = []
     batch_label = []
@@ -1427,7 +1766,9 @@ def calc_embedding(autoencoder, rna_data, atac_data, batch_size, d_time, method,
         lisi_score_vec.append(compute_lisi(sc_combined_embedding, domain_label, perplexity = 30))
 
         return(lisi_score_vec)
-    
+    else:
+        return(sc_combined_embedding)
+
 
 def plot_auroc_pergene(matrix_true, matrix_pred):
     matrix_true = binarize(matrix_true)
@@ -1453,6 +1794,18 @@ def plot_auroc_pergene(matrix_true, matrix_pred):
 
 
 def calc_wilcoxon(x, y, alternative='two-sided'):
+    """
+    Calculate the Wilcoxon signed-rank test for paired samples.
+    Parameters
+    ----------
+    x: numpy array or list, first input
+    y: numpy array or list, second input
+    alternative: 'two-sided', 'greater', or 'less', default 'two-sided'
+    Returns
+    ----------
+    output: numpy array of p-value and test statistic
+    """
+    
     if alternative=='norm':
         ttest = wilcoxon(x, y)
         pval = ttest.pvalue
@@ -1493,6 +1846,16 @@ def calc_wilcoxon(x, y, alternative='two-sided'):
 def calc_metric(x1, x2, metric='mse', logscale=True):
     """
     return comparison statistics between x1 and x2
+    Parameters
+    ----------
+    x1: numpy array or list, first input
+    x2: numpy array or list, second input
+    metric: 'mse' or 'pseudocor', if 'mse', return mean squared error, if 'pseudocor', return Pearson correlation coefficient
+    logscale: if True, apply log1p transformation to x1 and x2
+    Returns
+    ----------
+    output: float, mean squared error or Pearson correlation coefficient
+
     """
     if logscale:
         x1 = np.log1p(x1)
@@ -1508,8 +1871,17 @@ def eval_temporal_rna(sim_url, autoencoder, rna_data, timepoint):
     """
     evaluate cross-time and cross-condition prediction on the held-out timepoint
     return pseudobulk pearson correlation per cell type
+    Parameters
+    ----------
+    sim_url: url to save the results
+    autoencoder: trained autoencoder model
+    rna_data: scRNA-seq data, AnnData object
+    timepoint: time point to evaluate, e.g. 0, 1, 2, etc.
+    Returns
+    ----------
+    None, but saves the results in a text file
     """
-    celltype_list = rna_data.obs.major_trajectory.value_counts().index.tolist()
+    celltype_list = rna_data.obs.celltype.value_counts().index.tolist()
     for neighbor_ver in ['_prev', '_next']:
         fout = open(sim_url+ '_pseudobulk_eval' + neighbor_ver + '.txt', 'w')
         target_sex = list(rna_data[rna_data.obs.time==timepoint,:].obs.sex.unique())[0]
@@ -1529,14 +1901,14 @@ def eval_temporal_rna(sim_url, autoencoder, rna_data, timepoint):
 
         if not math.isnan(neighboring_timepoints_from) and not math.isnan(neighboring_timepoints_target):
             for ct in celltype_list:
-                rna_data_i = rna_data[(rna_data.obs.major_trajectory==ct) & (rna_data.obs.time==timepoint),]
-                rna_data_i_neighbor = rna_data[(rna_data.obs.time == neighboring_timepoints_from) & (rna_data.obs.major_trajectory==ct) & (rna_data.obs.sex==from_sex),]
+                rna_data_i = rna_data[(rna_data.obs.celltype==ct) & (rna_data.obs.time==timepoint),]
+                rna_data_i_neighbor = rna_data[(rna_data.obs.time == neighboring_timepoints_from) & (rna_data.obs.celltype==ct) & (rna_data.obs.sex==from_sex),]
                 
                 if rna_data_i.shape[0]>=10 and rna_data_i_neighbor.shape[0]>=10:
                     rna_data_i_pseudo = normalize_raw(rna_data_i.X.todense())
                     
                     ## predict using sum of neighboring cell types (baseline prediction)
-                    rna_data_i_target_neighbor = rna_data[(rna_data.obs.time == neighboring_timepoints_target) & (rna_data.obs.major_trajectory==ct) & (rna_data.obs.sex==target_sex),]
+                    rna_data_i_target_neighbor = rna_data[(rna_data.obs.time == neighboring_timepoints_target) & (rna_data.obs.celltype==ct) & (rna_data.obs.sex==target_sex),]
                     rna_data_i_target_neighbor_pseudo = normalize_raw(rna_data_i_target_neighbor.X.todense())
                     
                     ## predict missing time point by swapping sex factor (Sunbear prediction)
@@ -1569,6 +1941,20 @@ def eval_temporal_rna(sim_url, autoencoder, rna_data, timepoint):
 def eval_model_rna(sim_url, autoencoder, rna_data_val, timepoint):
     """
     evaluate RNA model on validation set, for downstream use of selecting hyperparameters
+    Parameters
+    ----------
+    sim_url: url to save the results
+    autoencoder: trained autoencoder model
+    rna_data_val: scRNA-seq data for validation, AnnData object
+    timepoint: time point to evaluate, e.g. 0, 1, 2, etc.
+    Returns
+    ----------
+    sim_metric_val: list of similarity metrics for validation set:
+    1. mean bulk Pearson correlation across all time points
+    2. mean bulk Pearson correlation across neighboring time points
+    3. mean LISI score across all time points
+    4. mean LISI score across neighboring time points
+
     """
     sim_metric_val = []
     sorted_timepoints = list(rna_data_val.obs.time.unique())
@@ -1645,28 +2031,38 @@ def eval_model_rna(sim_url, autoencoder, rna_data_val, timepoint):
     np.savetxt(sim_url+'_validation.txt', sim_metric_val, delimiter='\n', fmt='%1.10f')
 
 
-def calc_condition_diffexp(sim_url, autoencoder, rna_data_i, swap_encoding_source, swap_encoding_target):
+def calc_condition_diffexp(sim_url, autoencoder, rna_data_query, swap_encoding_query, swap_encoding_target):
     """
-    predict differences between conditions at any time point query
-    """
+    predict differences between conditions
+    Parameters
+    ----------
+    sim_url: url to save the results
+    autoencoder: trained autoencoder model
+    rna_data_query: scRNA-seq data query, AnnData object
+    swap_encoding_query: batch encoding for the query condition
+    swap_encoding_target: batch encoding for the target condition
+    Returns
+    ----------
+    None, but saves the differential expression patterns in text files for each cell type
 
-    ## TODO - ref calc_new_diffexp.py and sexdiff_eval.R
-    rna_data_i_reconstr = autoencoder.predict_rnanorm(rna_data_i.X.todense(), rna_data_i.obsm['encoding'].to_numpy(), swap_encoding_source)
-    rna_data_i_swap = autoencoder.predict_rnanorm(rna_data_i.X.todense(), rna_data_i.obsm['encoding'].to_numpy(), swap_encoding_target)
+    """
+    ## input query data
+    rna_data_query_reconstr = autoencoder.predict_rnanorm(rna_data_query.X.todense(), rna_data_query.obsm['encoding'].to_numpy(), swap_encoding_query)
+    rna_data_query_swap = autoencoder.predict_rnanorm(rna_data_query.X.todense(), rna_data_query.obsm['encoding'].to_numpy(), swap_encoding_target)
 
     ## normalize with total depth
-    rna_data_i_reconstr_norm = (rna_data_i_reconstr.T / np.mean(rna_data_i_reconstr, axis=1)).T
-    rna_data_i_swap_norm = (rna_data_i_swap.T / np.mean(rna_data_i_swap, axis=1)).T
+    rna_data_query_reconstr_norm = (rna_data_query_reconstr.T / np.mean(rna_data_query_reconstr, axis=1)).T
+    rna_data_query_swap_norm = (rna_data_query_swap.T / np.mean(rna_data_query_swap, axis=1)).T
     
-    for celltype_i in rna_data_i.obs.celltype.unique():
-        index = rna_data_i.obs.celltype==celltype_i
+    for celltype_i in rna_data_query.obs.celltype.unique():
+        index = rna_data_query.obs.celltype==celltype_i
         if np.sum(index)>=50:
             ttest_output = np.empty((0, 2))
-            for i in range(rna_data_i.shape[1]):
+            for i in range(rna_data_query.shape[1]):
                 ttest_output = np.vstack([ttest_output, calc_wilcoxon(
-                    rna_data_i_swap_norm[index, i], rna_data_i_reconstr_norm[index, i], alternative='norm')])
+                    rna_data_query_swap_norm[index, i], rna_data_query_reconstr_norm[index, i], alternative='norm')])
                 
-            d = {'gene': rna_data_i.var['gene_short_name'].tolist(), 
+            d = {'gene': rna_data_query.var['gene_short_name'].tolist(), 
                     #'pval': ttest_output[:,0].tolist(), 
                     'statistic': ttest_output[:,1].tolist()}
             output_df = pd.DataFrame(data=d)
